@@ -17,12 +17,15 @@ Index.pageSize = 100;
  */
 Index.initializeAll = function () {
     // Bind events to DOM
-    $(document).on("click.edit-header-1", "#edit-header-1", () => Index.promptCustomColumn(1));
-    $(document).on("click.edit-header-2", "#edit-header-2", () => Index.promptCustomColumn(2));
+    $(document).on("click", "[id^=edit-header-]", function () {
+        const headerIndex = $(this).attr("id").split("-")[2];
+        Index.promptCustomColumn(headerIndex);
+    });
     $(document).on("click.mode-toggle", ".mode-toggle", Index.toggleMode);
     $(document).on("change.page-select", "#page-select", () => IndexTable.dataTable.page($("#page-select").val() - 1).draw("page"));
     $(document).on("change.thumbnail-crop", "#thumbnail-crop", Index.toggleCrop);
     $(document).on("change.namespace-sortby", "#namespace-sortby", Index.handleCustomSort);
+    $(document).on("change.columnCount", "#columnCount", Index.handleColumnNum);
     $(document).on("click.order-sortby", "#order-sortby", Index.toggleOrder);
     $(document).on("click.open-carousel", ".collapsible-title", Index.toggleCarousel);
     $(document).on("click.reload-carousel", "#reload-carousel", Index.updateCarousel);
@@ -98,8 +101,8 @@ Index.initializeAll = function () {
     Server.callAPI("/api/info", "GET", null, "Error getting basic server info!",
         (data) => {
             Index.serverVersion = data.version;
-            Index.debugMode = data.debug_mode === "1";
-            Index.isProgressLocal = data.server_tracks_progress !== "1";
+            Index.debugMode = !!data.debug_mode;
+            Index.isProgressLocal = !data.server_tracks_progress;
             Index.pageSize = data.archives_per_page;
 
             // Check version if not in debug mode
@@ -122,7 +125,12 @@ Index.initializeAll = function () {
             IndexTable.initializeAll();
         });
 
+    const columnCountSelect = document.getElementById("columnCount");
+    const storedColumnCount = localStorage.getItem("columnCount");
+    columnCountSelect.value = storedColumnCount ? storedColumnCount : 2;
+    
     Index.updateTableHeaders();
+    Index.resizableColumns();
 };
 
 Index.toggleMode = function () {
@@ -269,10 +277,12 @@ Index.updateTableControls = function (currentSort, currentOrder, totalPages, cur
     if (localStorage.indexViewMode === "1") {
         $(".thumbnail-options").show();
         $(".thumbnail-toggle").show();
+        $(".compact-options").hide();
         $(".compact-toggle").hide();
     } else {
         $(".thumbnail-options").hide();
         $(".thumbnail-toggle").hide();
+        $(".compact-options").show();
         $(".compact-toggle").show();
     }
 
@@ -368,19 +378,55 @@ Index.updateCarousel = function (e) {
     }
 };
 
+Index.handleColumnNum = function () {
+    const columnCountSelect = document.getElementById("columnCount");
+    const selectedCount = columnCountSelect.value;
+    localStorage.setItem("columnCount", selectedCount);
+    Index.updateTableHeaders();
+    document.location.reload(true);
+};
+
+/**
+ * Generate the Table Headers based on the custom namespaces set in localStorage.
+ */
+Index.generateTableHeaders = function (columnCount) {
+    const headerRow = $("#header-row");
+    headerRow.empty();
+    const headerWidth = localStorage.getItem(`resizeColumn0`) || "";
+    headerRow.append(`<th id="titleheader" width="${headerWidth}">
+							<a>Title</a>
+						</th>`);
+
+    for (let i = 1; i <= columnCount; i++) {
+        const customColumn = localStorage[`customColumn${i}`] || `Header ${i}`;
+        const colWidth = localStorage.getItem(`resizeColumn${i}`) || "";
+
+        const headerHtml = `  
+            <th id="customheader${i}" width="${colWidth}">  
+                <i id="edit-header-${i}" class="fas fa-pencil-alt edit-header-btn" title="Edit this column"></i>  
+                <a id="header-${i}">${customColumn.charAt(0).toUpperCase() + customColumn.slice(1)}</a>  
+            </th>`;
+        headerRow.append(headerHtml);
+    }
+    headerRow.append(`<th id="tagsheader">
+							<a>Tags</a>
+						</th>`);
+};
+
+
 /**
  * Update the Table Headers based on the custom namespaces set in localStorage.
  */
 Index.updateTableHeaders = function () {
-    const cc1 = localStorage.customColumn1;
-    const cc2 = localStorage.customColumn2;
+    let columnCount = localStorage.columnCount ? parseInt(localStorage.columnCount) : 2;
+    Index.generateTableHeaders(columnCount);
 
-    $("#customcol1").val(cc1);
-    $("#customcol2").val(cc2);
+    for (let i = 1; i <= columnCount; i++) {
+        const customColumn = localStorage[`customColumn${i}`] || `Header ${i}`;
+        $(`#customcol${i}`).val(customColumn);
 
-    // Modify text of <a> in headers
-    $("#header-1").html(cc1.charAt(0).toUpperCase() + cc1.slice(1));
-    $("#header-2").html(cc2.charAt(0).toUpperCase() + cc2.slice(1));
+        $(`#header-${i}`).html(customColumn.charAt(0).toUpperCase() + customColumn.slice(1) || `Header ${i}`);
+    }
 };
 
 /**
@@ -525,6 +571,55 @@ Index.loadContextMenuCategories = (catList, id) => Server.callAPI(`/api/archives
 );
 
 /**
+ * Build rating options for contextMenu and select the one for the current ID.
+ * @param {*} id The ID of the archive to check
+ * @returns Ratings
+ */
+Index.loadContextMenuRatings = (id) => Server.callAPI(`/api/archives/${id}/metadata`, "GET", null, `Error finding metadata for ${id}!`,
+    (data) => {
+        const items = {};
+        const ratings = [{
+            name: "Remove rating"
+        }, {
+            name: "⭐",
+        }, {
+            name: "⭐⭐",
+        }, {
+            name: "⭐⭐⭐",
+        }, {
+            name: "⭐⭐⭐⭐",
+        }, {
+            name: "⭐⭐⭐⭐⭐",
+        }];
+        const tags = LRR.splitTagsByNamespace(data.tags);
+        const hasRating = Object.keys(tags).some(x => x === "rating");
+        const ratingValue = hasRating ? tags["rating"] : [0];
+
+        for (let i = 0; i < ratings.length; i++) {
+            items[i] = ratings[i];
+            items[i].type = "checkbox";
+
+            if (items[i].name === ratingValue[0]) { items[i].selected = true; }
+            items[i].events = {
+                click() {
+                    if(i === 0) delete tags["rating"];
+                    else tags["rating"] = [ratings[i].name];
+
+                    Server.updateTagsFromArchive(id, Object.entries(tags).flatMap(([namespace, tagArray]) => tagArray.map(tag => LRR.buildNamespacedTag(namespace, tag))));
+
+                    // Update the rating info without reload but have to refresh everything.
+                    IndexTable.dataTable.ajax.reload(null, false);
+                    Index.updateCarousel();
+                    $(this).parents("ul.context-menu-list").find("input[type='checkbox']").toArray().filter((x) => x !== this).forEach(x => x.checked = false);
+                },
+            };
+        }
+
+        return items;
+    },
+);
+
+/**
  * Handle context menu clicks.
  * @param {*} option The clicked option
  * @param {*} id The Archive ID
@@ -614,8 +709,17 @@ Index.loadCategories = function () {
             // Sort by pinned + alpha
             // Pinned categories are shown at the beginning
             data.sort((b, a) => b.name.localeCompare(a.name));
-            data.sort((a, b) => a.pinned < b.pinned);
-            let html = "";
+            data.sort((a, b) => b.pinned - a.pinned);
+            // Queue some hardcoded categories at the beginning - those are special-cased in the DataTables variant of the search endpoint. 
+            let html = `<div style='display:inline-block'>
+                            <input class='favtag-btn ${(("NEW_ONLY" === Index.selectedCategory) ? "toggled" : "")}' 
+                            type='button' id='NEW_ONLY' value='🆕 New only' 
+                            onclick='Index.toggleCategory(this)' title='Click here to display new archives only.'/>
+                        </div><div style='display:inline-block'>
+                            <input class='favtag-btn ${(("UNTAGGED_ONLY" === Index.selectedCategory) ? "toggled" : "")}' 
+                            type='button' id='UNTAGGED_ONLY' value='🏷️ Untagged only' 
+                            onclick='Index.toggleCategory(this)' title='Click here to display untagged archives only.'/>
+                        </div>`;
 
             const iteration = (data.length > 10 ? 10 : data.length);
 
@@ -706,6 +810,80 @@ Index.migrateProgress = function () {
     } else {
         // eslint-disable-next-line no-console
         console.log("No local reading progression to migrate");
+    }
+};
+
+/**
+ * Restore and update column width, data store in localstorge.
+ */
+Index.resizableColumns = function () {
+    let currentHeader;
+    let currentIndex;
+    let startX;
+    let startWidth;
+
+    const headers = document.querySelectorAll("#header-row th");
+    headers.forEach((header, i) => {
+        
+        // init
+        header.addEventListener('mousedown', function (event) {
+            if (event.offsetX > header.offsetWidth - 10) {
+                
+                currentHeader = header;
+                currentIndex = Array.from(headers).indexOf(currentHeader);
+                startX = event.clientX;
+
+                startWidth = localStorage.getItem(`resizeColumn${currentIndex}`) || header.width || header.offsetWidth;
+                if (!Number.isInteger(startWidth))
+                    startWidth = parseInt(startWidth.replace('px', ''));
+
+                document.addEventListener('mousemove', resizeColumn);
+                document.addEventListener('mouseup', stopResize);
+
+                // Disable DataTables sorting while resizing
+                // (Unfortunately, sorting is perma-disabled after this..)
+                $('th').unbind('click.DT');
+
+                document.body.style.cursor = 'col-resize';
+            }
+        });
+        header.addEventListener('mousemove', function (event) {
+            if (event.offsetX > header.offsetWidth - 10) {
+                header.style.cursor = 'col-resize';
+            } else {
+                header.style.cursor = 'default';
+            }
+        });
+    });
+
+    function resizeColumn(event) {
+        if (currentHeader) {
+            currentHeader.style.cursor = 'col-resize';
+            let newWidth = startWidth + (event.clientX - startX);
+            const minWidth = parseInt(window.getComputedStyle(currentHeader).minWidth.replace('px', ''));
+            const maxWidth = parseInt(window.getComputedStyle(currentHeader).maxWidth.replace('px', ''));
+
+            if (newWidth > maxWidth) 
+                newWidth = maxWidth;
+            
+            if (newWidth < minWidth) 
+                newWidth = minWidth;
+            
+            if (newWidth > 0) {
+                currentHeader.style.width = newWidth + 'px';
+                localStorage.setItem(`resizeColumn${currentIndex}`, newWidth + 'px');
+            }
+        }
+    }
+
+    function stopResize() {
+        if (currentHeader) {
+            currentHeader = null;
+        }
+        document.removeEventListener('mousemove', resizeColumn);
+        document.removeEventListener('mouseup', stopResize);
+
+        document.body.style.cursor = 'default';
     }
 };
 
